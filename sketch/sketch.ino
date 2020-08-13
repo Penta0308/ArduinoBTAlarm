@@ -54,6 +54,10 @@ void setup() {
 
 void loop() {
   char arglinebufPos = 0;
+  Time _temptime = rtc.time();
+  if(alarmtime > getTimeStamp(&_temptime)) { // YEAHHH
+    
+  }
   if (btSerial.available()) {
     byte b = btSerial.read();
     Serial.write(btSerial.read());//블루투스측 내용을 시리얼모니터에 출력
@@ -88,6 +92,10 @@ void loop() {
           delete t;
           break;
         }
+        case 'g': { //RTC GET : g
+          btSerial.write(getTimeStamp(&_temptime));
+          break;
+        }
       }
       command = 0;
       return;
@@ -95,10 +103,6 @@ void loop() {
   }
   if (Serial.available()) {
     btSerial.write(Serial.read());//시리얼모니터 내용을 블루추스 측에 출력
-  }
-  Time _temptime = rtc.time();
-  if(alarmtime > getTimeStamp(&_temptime)) { // YEAHHH
-    
   }
 }
 
