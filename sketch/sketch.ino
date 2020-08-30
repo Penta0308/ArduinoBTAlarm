@@ -28,6 +28,10 @@ const float SERVO_ANGLEMUL = 5.5555553436279296875f;
 #define CTOUCH_PULSEDELAY_us 400
 #define CTOUCH_READDELAY_us 100
 
+#define BUFFERLEN_ARGLINE 64
+#define BUFFERLEN_COMMANDSET 8
+#define BUFFERLEN_ALARMSET 10
+
 NeoSWSerial btSerial(PIN_BLUETX, PIN_BLUERX);
 DS1302 rtc(PIN_RTC_CE, PIN_RTC_IO, PIN_RTC_SCLK);
 
@@ -36,17 +40,64 @@ typedef union _u8i8 {
   int8_t i;
 } u8i8;
 
-typedef struct _CommandSet {
+typedef class _CommandSet {
+private:
+  byte arglinebufsize;
+public:
+  _CommandSet(const char _command, const char* _arglinebuf);
+  ~_CommandSet();
   char command = 0;
-  char * arglinebuf = NULL;
+  char* arglinebuf = NULL;
 } CommandSet;
 
-typedef struct _AlarmSet {
-  time_t alarmtime = 0;
-  byte commandSetCount = 0;
-  byte commandSetCountRaw = 0;
+_CommandSet::_CommandSet(const char _command, const char* _arglinebuf) {
+  command = _command;
+  arglinebufsize = strlen(arglinebuf) + 1;
+  arglinebuf = (char*)malloc(arglinebufsize);
+  memcpy(arglinebuf, _arglinebuf, arglinebufsize);
+}
+
+_CommandSet::~_CommandSet() {
+  free(arglinebuf);
+}
+
+typedef class _AlarmSet {
+private:
+  byte commandSetWorking = 0;
   CommandSet** commandSetList = NULL;
+public:
+  byte commandSetCount = 0;
+  _AlarmSet(time_t _alarmtime);
+  ~_AlarmSet();
+  void push(CommandSet* _commandSet);
+  CommandSet* pop();
+  time_t alarmtime = 0;
+  boolean popped = false;
 } AlarmSet;
+
+_AlarmSet::_AlarmSet(time_t _alarmtime) {
+  alarmtime = _alarmtime;
+  commandSetList = (CommandSet**)malloc(sizeof(CommandSet*) * BUFFERLEN_COMMANDSET);
+}
+
+_AlarmSet::~_AlarmSet() {
+  for(; commandSetWorking < commandSetCount; commandSetWorking++)
+    delete commandSetList[commandSetWorking];
+  free(commandSetList);
+}
+
+void _AlarmSet::push(CommandSet* _commandSet) {
+  commandSetList[commandSetCount] = _commandSet;
+  commandSetCount++;
+}
+
+CommandSet* _AlarmSet::pop() {
+  popped = true;
+  if(commandSetWorking == commandSetCount) return nullptr;
+  CommandSet* ret = commandSetList[commandSetWorking];
+  commandSetWorking++;
+  return ret;
+}
 
 boolean CTouch_read(byte sensepin, byte pulsepin) { // SENSE: INPUT, PULSE: OUTPUT
   //pinMode(pulsepin, OUTPUT);
@@ -81,21 +132,6 @@ short _StaticServo::write(float _angle, byte _count) {
   noInterrupts();
   short td = (short)(_angle * SERVO_ANGLEMUL) + 1000 + SERVO_OFFSET_us.i;
   byte sc = 0;
-/*  if(nd == -1) nd = td;
-  if(_count > SERVO_GRADUALSTEPCOUNT) {
-    float dd = (td - nd) / (SERVO_GRADUALSTEPCOUNT - 1.0f);
-    short rd;
-    for(; sc < SERVO_GRADUALSTEPCOUNT; sc++) {
-      rd = nd + (short)(dd * sc);
-      //btSerial.println(rd, DEC);
-      digitalWrite(pin, HIGH);
-      delayMicroseconds(rd);
-      digitalWrite(pin, LOW);
-      delayMicroseconds(16000);
-      delayMicroseconds(12000);
-      delayMicroseconds(2000 - rd);
-    }
-  } else goto staticservowriteloop;*/
 staticservowriteloop:
   //btSerial.println(td, DEC);
   digitalWrite(pin, HIGH);
@@ -111,9 +147,9 @@ staticservowriteloop:
   goto staticservowriteloop;
 }
 
-time_t getTimeStamp(Time * t) {
+time_t getTimeStamp(Time* t) {
   tmElements_t te;
-  te.Year = t->yr - 1970;
+  te.Year = t->yr;
   te.Month = t->mon;
   te.Day = t->date;
   te.Hour = t->hr;
@@ -122,10 +158,10 @@ time_t getTimeStamp(Time * t) {
   return makeTime(te);
 }
 
-Time * parseTimeStamp(time_t ts) {
+Time* parseTimeStamp(time_t ts) {
   tmElements_t te;
   breakTime(ts, te);
-  return new Time(te.Year + 1970, te.Month, te.Day, te.Hour, te.Minute, te.Second, Time::Day::kSunday);
+  return new Time(te.Year, te.Month, te.Day, te.Hour, te.Minute, te.Second, Time::Day::kSunday);
 }
 
 /*
@@ -145,7 +181,7 @@ Time * parseTimeStamp(time_t ts) {
  *  eANGLE(Decimal) : SERVO SET
  *  tUTCSTAMP : RTC SET
  *  g : RTC GET
- *  rALARMID(1-digit Decimal, 0~9)UTCSTAMP : ALARM SET - RECORDING ON
+ *  rALARMID(1-digit Decimal, 0~9)DeltaUTCSTAMP : ALARM SET - RECORDING ON
  *  f : RECORDING OFF
  *  dSECOND : Async Pause Action
  *  qMS : Sync Pause Action
@@ -153,16 +189,16 @@ Time * parseTimeStamp(time_t ts) {
 
 StaticServo servo;
 
-signed char recording = -1;
-byte command = 0;
-char * arglinebuf;
-AlarmSet* alarmSetList[10];
+int8_t recording = -1;
+uint8_t command = 0;
+char arglinebuf[BUFFERLEN_ARGLINE];
+AlarmSet* alarmSetList[BUFFERLEN_ALARMSET];
 
 time_t timestampoffset = 0;
 
-char arglinebufPos = 0;
+uint8_t arglinebufPos = 0;
 
-byte sensedtct = 0;
+uint8_t sensedtct = 0;
 
 void setup() {
   Serial.begin(9600);
@@ -172,14 +208,16 @@ void setup() {
   pinMode(PIN_SWITCH_PULSE, OUTPUT);
   delay(500);
   servo.attach(9);
-  arglinebuf = new char(64);
+  //arglinebuf = new char(BUFFERLEN_ARGLINE);
+  //alarmSetList = malloc(sizeof(AlarmSet*) * 10);
+  memset(alarmSetList, 0x0, 10);
   SERVO_OFFSET_us.u = EEPROM.read(EEP_SERVO_OFFSET_us);
   Time _temptime = rtc.time();
   timestampoffset = getTimeStamp(&_temptime);
 }
 
-byte beforeswitchstat = 0;
-byte switchstat = 0;
+uint8_t beforeswitchstat = 0;
+uint8_t switchstat = 0;
 
 void loop() {
   if(millis() % 300000 > 150000) { // 5Min.
@@ -188,19 +226,18 @@ void loop() {
     timestampoffset = temptimestamp - millis() / 1000;
   }
   time_t timestamp = timestampoffset + millis() / 1000;
-  for(byte i = 0; i < 10; i++) {
+  for(uint8_t i = 0; i < BUFFERLEN_ALARMSET; i++) {
     if(alarmSetList[i]) {
-      if(alarmSetList[i]->alarmtime > timestamp) { // Trigger Alarm i
-        if(alarmSetList[i]->commandSetCount) { // DO IT
-          byte command = alarmSetList[i]->commandSetList[alarmSetList[i]->commandSetCountRaw - alarmSetList[i]->commandSetCountRaw]->command;
-          char * arglinebuf = alarmSetList[i]->commandSetList[alarmSetList[i]->commandSetCountRaw - alarmSetList[i]->commandSetCountRaw]->arglinebuf;
+      if(alarmSetList[i]->alarmtime < timestamp) { // Trigger Alarm i
+	      CommandSet* p = alarmSetList[i]->pop();
+  		  if(p) { // DO IT
+          char command = p->command;
+          char* arglinebuf = p->arglinebuf;
           if(command == 'd') alarmSetList[i]->alarmtime += atol(arglinebuf);
           else doLine(command, arglinebuf, false);
           free(arglinebuf);
-          delete alarmSetList[i]->commandSetList[alarmSetList[i]->commandSetCountRaw - alarmSetList[i]->commandSetCountRaw];
-          alarmSetList[i]->commandSetCount--;
+          delete p;
         } else { // FREE THEM
-          free(alarmSetList[i]->commandSetList);
           delete alarmSetList[i];
           alarmSetList[i] = 0;
         }
@@ -221,26 +258,19 @@ void loop() {
         byte b = EEPROM.read(EEP_SERVO_ON);
         //btSerial.println(b, DEC);
         servo.write(b, SERVO_PULSECOUNT);
-        delay(100);
+        //delay(100);
       } else if(switchstat == 0b00000010) { // OFF
         byte b = EEPROM.read(EEP_SERVO_OFF);
         //btSerial.println(b, DEC);
         servo.write(b, SERVO_PULSECOUNT);
-        delay(100);
+        //delay(100);
       }
     }
-    for(byte i = 0; i < 10; i++) {
+    for(uint8_t i = 0; i < BUFFERLEN_ALARMSET; i++) {
       if(alarmSetList[i]) {
-        if(alarmSetList[i]->alarmtime > timestamp) { // Trigger Alarm i
-          if(alarmSetList[i]->commandSetCount) { // DO IT
-            free(alarmSetList[i]->commandSetList[alarmSetList[i]->commandSetCountRaw - alarmSetList[i]->commandSetCountRaw]->arglinebuf);
-            delete alarmSetList[i]->commandSetList[alarmSetList[i]->commandSetCountRaw - alarmSetList[i]->commandSetCountRaw];
-            alarmSetList[i]->commandSetCount--;
-          } else { // FREE THEM
-            free(alarmSetList[i]->commandSetList);
-            delete alarmSetList[i];
-            alarmSetList[i] = 0;
-          }
+        if(alarmSetList[i]->popped) {
+          delete alarmSetList[i];
+		      alarmSetList[i] = 0;
         }
       }
     }
@@ -252,7 +282,7 @@ void loop() {
     byte b = btSerial.read();
     Serial.write(b);//블루투스측 내용을 시리얼모니터에 출력
     if (command == 0) command = b;
-    else if (arglinebufPos < 64 && b != '\n') {
+    else if (arglinebufPos < BUFFERLEN_ARGLINE && b != '\n') {
       arglinebuf[arglinebufPos] = b;
       arglinebufPos++;
     }else if (b == '\n' && command != 0) {
@@ -261,28 +291,22 @@ void loop() {
       //DO command
       if (command == '+' || command == 'O') goto btlineworkend;
       else if(command == 'f') {
+        btSerial.println(alarmSetList[recording]->commandSetCount, DEC);
         recording = -1;
         btSerial.println("OK");
-      }
-      else if (recording != -1) {
-        alarmSetList[recording]->commandSetCountRaw++;
-        alarmSetList[recording]->commandSetCount = alarmSetList[recording]->commandSetCountRaw;
-        alarmSetList[recording]->commandSetList = (CommandSet**)realloc(alarmSetList[recording]->commandSetList, sizeof(CommandSet*) * alarmSetList[recording]->commandSetCount);
-        if(alarmSetList[recording]->commandSetList) {
-          alarmSetList[recording]->commandSetList[alarmSetList[recording]->commandSetCount - 1] = new CommandSet();
-          alarmSetList[recording]->commandSetList[alarmSetList[recording]->commandSetCount - 1]->command = command;
-          alarmSetList[recording]->commandSetList[alarmSetList[recording]->commandSetCount - 1]->arglinebuf = (char*)malloc(arglinebufPos);
-          if(alarmSetList[recording]->commandSetList[alarmSetList[recording]->commandSetCount - 1]->arglinebuf) {
-            memcpy(alarmSetList[recording]->commandSetList[alarmSetList[recording]->commandSetCount - 1]->arglinebuf, arglinebuf, arglinebufPos);
-            btSerial.println("OK");
-          } else // RAM FULL
-            btSerial.println("ERROR");
-        } else // RAM FULL
-          btSerial.println("ERROR");
-      } else doLine(command, arglinebuf, true);
+      } else if(command == 'r') { //ALARM SET: rALARMID(1-digit Decimal, 0~9)UTCSTAMP
+         Time _temptime = rtc.time();
+         time_t alarmtime = atol(arglinebuf + 1) + getTimeStamp(&_temptime);
+         arglinebuf[1] = '\0';
+         recording = atoi(arglinebuf);
+         if(alarmSetList[recording]) delete alarmSetList[recording];
+         alarmSetList[recording] = new AlarmSet(alarmtime);
+         btSerial.println("OK");
+      } else if (recording != -1)
+        alarmSetList[recording]->push(new CommandSet(command, arglinebuf));
+      else doLine(command, arglinebuf, true);
 btlineworkend:
       command = 0;
-      return;
     }
   }
   if (Serial.available()) {
@@ -298,22 +322,23 @@ btlineworkend:
   delete rtcdata;
 }*/
 
-void doLine(const char command, char * arglinebuf, boolean replying) {
+void doLine(const char command, char* arglinebuf, boolean replying) {
   if(command == 's') { //SET EEP : sADDR(4-digit Decimal)DATA(3-digit Decimal)
     byte eepdata = atoi(arglinebuf + 4);
     arglinebuf[4] = '\0';
     short eepaddr = atoi(arglinebuf);
-    btSerial.println(eepaddr, DEC);
-    btSerial.println(eepdata, DEC);
+    if(replying) btSerial.println(eepaddr, DEC);
+    if(replying) btSerial.println(eepdata, DEC);
     EEPROM.update(eepaddr, eepdata);
     if(eepdata == EEPROM.read(eepaddr)) if(replying) btSerial.write("OK");
     else if(replying)btSerial.write("ERROR");
   } else if(command == 'e') { //EVALUATE SERVO : eANGLE
     float angle = atof(arglinebuf);
-    btSerial.println(servo.write(angle, SERVO_PULSECOUNT), DEC);
-    btSerial.println("OK");
+    short sv = servo.write(angle, SERVO_PULSECOUNT);
+    if(replying) btSerial.println(sv, DEC);
+    if(replying) btSerial.println("OK");
   } else if(command == 't') { //RTC SET : tUTCSTAMP
-    Time * t = parseTimeStamp(atol(arglinebuf));
+    Time* t = parseTimeStamp(atol(arglinebuf));
     rtc.writeProtect(false);
     rtc.halt(false);
     rtc.time(*t);
@@ -326,14 +351,6 @@ void doLine(const char command, char * arglinebuf, boolean replying) {
     if(replying) btSerial.println("OK");
     Time _temptime = rtc.time();
     if(replying) btSerial.println(getTimeStamp(&_temptime), DEC);
-  } else if(command == 'r') { //ALARM SET: rALARMID(1-digit Decimal, 0~9)UTCSTAMP
-    time_t alarmtime = atol(arglinebuf + 1);
-    arglinebuf[1] = '\0';
-    recording = atoi(arglinebuf);
-    if(alarmSetList[recording]) delete alarmSetList[recording];
-    alarmSetList[recording] = new AlarmSet();
-    alarmSetList[recording]->alarmtime = alarmtime;
-    if(replying) btSerial.println("OK");
   } else if(command == 'q') {
     delay(atoi(arglinebuf));
     if(replying) btSerial.write("OK");
