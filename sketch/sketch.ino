@@ -1,3 +1,5 @@
+//#define DEBUG
+
 #include <NeoSWSerial.h>
 #include <TimeLib.h>
 #include <DS1302.h>
@@ -46,15 +48,20 @@ private:
 public:
   _CommandSet(const char _command, const char* _arglinebuf);
   ~_CommandSet();
-  char command = 0;
-  char* arglinebuf = NULL;
+  char command;
+  char* arglinebuf;
 } CommandSet;
 
 _CommandSet::_CommandSet(const char _command, const char* _arglinebuf) {
   command = _command;
-  arglinebufsize = strlen(arglinebuf) + 1;
+  arglinebufsize = strlen(_arglinebuf) + 1;
   arglinebuf = (char*)malloc(arglinebufsize);
   memcpy(arglinebuf, _arglinebuf, arglinebufsize);
+  #ifdef DEBUG
+  Serial.println(arglinebufsize, DEC);
+  Serial.println(_arglinebuf);
+  Serial.println(arglinebuf);
+  #endif
 }
 
 _CommandSet::~_CommandSet() {
@@ -63,19 +70,22 @@ _CommandSet::~_CommandSet() {
 
 typedef class _AlarmSet {
 private:
-  byte commandSetWorking = 0;
-  CommandSet** commandSetList = NULL;
+  byte commandSetWorking;
+  CommandSet** commandSetList;
+  byte commandSetCount;
 public:
-  byte commandSetCount = 0;
   _AlarmSet(time_t _alarmtime);
   ~_AlarmSet();
   void push(CommandSet* _commandSet);
   CommandSet* pop();
   time_t alarmtime = 0;
-  boolean popped = false;
+  boolean popped;
 } AlarmSet;
 
 _AlarmSet::_AlarmSet(time_t _alarmtime) {
+  popped = false;
+  commandSetWorking = 0;
+  commandSetCount = 0;
   alarmtime = _alarmtime;
   commandSetList = (CommandSet**)malloc(sizeof(CommandSet*) * BUFFERLEN_COMMANDSET);
 }
@@ -88,14 +98,25 @@ _AlarmSet::~_AlarmSet() {
 
 void _AlarmSet::push(CommandSet* _commandSet) {
   commandSetList[commandSetCount] = _commandSet;
+  #ifdef DEBUG
+  Serial.print("PUSHING");
+  Serial.println(commandSetCount, DEC);
+  #endif
   commandSetCount++;
 }
 
 CommandSet* _AlarmSet::pop() {
   popped = true;
-  if(commandSetWorking == commandSetCount) return nullptr;
+  #ifdef DEBUG
+  Serial.print("POPPING");
+  Serial.println(commandSetWorking, DEC);
+  #endif
+  if(commandSetWorking >= commandSetCount) return NULL;
   CommandSet* ret = commandSetList[commandSetWorking];
   commandSetWorking++;
+  #ifdef DEBUG
+  Serial.println("POPPED");
+  #endif
   return ret;
 }
 
@@ -130,6 +151,8 @@ short _StaticServo::write(float _angle) { return write(_angle, 1); }
 
 short _StaticServo::write(float _angle, byte _count) {
   noInterrupts();
+  pinMode(PIN_SWITCH_ON, OUTPUT);
+  pinMode(PIN_SWITCH_OFF, OUTPUT);
   short td = (short)(_angle * SERVO_ANGLEMUL) + 1000 + SERVO_OFFSET_us.i;
   byte sc = 0;
 staticservowriteloop:
@@ -142,6 +165,8 @@ staticservowriteloop:
   if(++sc == _count) {
     nd = td;
     interrupts();
+    pinMode(PIN_SWITCH_ON, INPUT);
+    pinMode(PIN_SWITCH_OFF, INPUT);
     return nd;
   }
   goto staticservowriteloop;
@@ -195,6 +220,7 @@ char arglinebuf[BUFFERLEN_ARGLINE];
 AlarmSet* alarmSetList[BUFFERLEN_ALARMSET];
 
 time_t timestampoffset = 0;
+time_t lastrefresh = 0;
 
 uint8_t arglinebufPos = 0;
 
@@ -214,33 +240,63 @@ void setup() {
   SERVO_OFFSET_us.u = EEPROM.read(EEP_SERVO_OFFSET_us);
   Time _temptime = rtc.time();
   timestampoffset = getTimeStamp(&_temptime);
+  #ifdef DEBUG
+  Serial.println("SETUP END");
+  #endif
 }
 
 uint8_t beforeswitchstat = 0;
 uint8_t switchstat = 0;
 
 void loop() {
-  if(millis() % 300000 > 150000) { // 5Min.
+  #ifdef DEBUG
+  //Serial.println("l");
+  #endif
+  if(millis() - lastrefresh > 3600000) { // 60Min.
     Time _temptime = rtc.time();
     time_t temptimestamp = getTimeStamp(&_temptime);
     timestampoffset = temptimestamp - millis() / 1000;
+    lastrefresh = millis();
+    #ifdef DEBUG
+    Serial.println("REFRESHING RTC");
+    #endif
   }
   time_t timestamp = timestampoffset + millis() / 1000;
   for(uint8_t i = 0; i < BUFFERLEN_ALARMSET; i++) {
     if(alarmSetList[i]) {
       if(alarmSetList[i]->alarmtime < timestamp) { // Trigger Alarm i
+        #ifdef DEBUG
+        Serial.print("TRIGGERED");
+        Serial.println(i, DEC);
+	      #endif
 	      CommandSet* p = alarmSetList[i]->pop();
+        #ifdef DEBUG
+        Serial.println((int)p, DEC);
+        #endif
   		  if(p) { // DO IT
           char command = p->command;
           char* arglinebuf = p->arglinebuf;
+          #ifdef DEBUG
+          Serial.print(command);
+          Serial.println(arglinebuf);
+          #endif
           if(command == 'd') alarmSetList[i]->alarmtime += atol(arglinebuf);
           else doLine(command, arglinebuf, false);
-          free(arglinebuf);
           delete p;
         } else { // FREE THEM
+          #ifdef DEBUG
+          Serial.print("FREEING");
+          Serial.println(i, DEC);
+          #endif
           delete alarmSetList[i];
           alarmSetList[i] = 0;
+          #ifdef DEBUG
+          Serial.print("FREED");
+          #endif
         }
+        #ifdef DEBUG
+        //Serial.println("n");
+        #endif
       }
     }
   }
@@ -269,6 +325,10 @@ void loop() {
     for(uint8_t i = 0; i < BUFFERLEN_ALARMSET; i++) {
       if(alarmSetList[i]) {
         if(alarmSetList[i]->popped) {
+          #ifdef DEBUG
+          Serial.print("ALARMINT");
+          Serial.println(i, DEC);
+          #endif
           delete alarmSetList[i];
 		      alarmSetList[i] = 0;
         }
@@ -291,17 +351,21 @@ void loop() {
       //DO command
       if (command == '+' || command == 'O') goto btlineworkend;
       else if(command == 'f') {
-        btSerial.println(alarmSetList[recording]->commandSetCount, DEC);
+        //btSerial.println(alarmSetList[recording]->commandSetCount, DEC);
         recording = -1;
         btSerial.println("OK");
       } else if(command == 'r') { //ALARM SET: rALARMID(1-digit Decimal, 0~9)UTCSTAMP
-         Time _temptime = rtc.time();
-         time_t alarmtime = atol(arglinebuf + 1) + getTimeStamp(&_temptime);
-         arglinebuf[1] = '\0';
-         recording = atoi(arglinebuf);
-         if(alarmSetList[recording]) delete alarmSetList[recording];
-         alarmSetList[recording] = new AlarmSet(alarmtime);
-         btSerial.println("OK");
+        time_t alarmtime = atol(arglinebuf + 1) + timestampoffset + millis() / 1000;
+        arglinebuf[1] = '\0';
+        recording = atoi(arglinebuf);
+        if(alarmSetList[recording]) delete alarmSetList[recording];
+        alarmSetList[recording] = new AlarmSet(alarmtime);
+        #ifdef DEBUG
+        Serial.print("RECORDING");
+        Serial.println(recording, DEC);
+        //Serial.println(alarmSetList[recording]->alarmtime - getTimeStamp(&_temptime), DEC);
+        #endif
+        btSerial.println("OK");
       } else if (recording != -1)
         alarmSetList[recording]->push(new CommandSet(command, arglinebuf));
       else doLine(command, arglinebuf, true);
@@ -333,10 +397,24 @@ void doLine(const char command, char* arglinebuf, boolean replying) {
     if(eepdata == EEPROM.read(eepaddr)) if(replying) btSerial.write("OK");
     else if(replying)btSerial.write("ERROR");
   } else if(command == 'e') { //EVALUATE SERVO : eANGLE
-    float angle = atof(arglinebuf);
-    short sv = servo.write(angle, SERVO_PULSECOUNT);
-    if(replying) btSerial.println(sv, DEC);
-    if(replying) btSerial.println("OK");
+    if(isdigit(arglinebuf[0])) {
+      float angle = atof(arglinebuf);
+      short sv = servo.write(angle, SERVO_PULSECOUNT);
+      if(replying) btSerial.println(sv, DEC);
+      if(replying) btSerial.println("OK");
+    } else if(arglinebuf[0] == 'n') {
+      byte angle = EEPROM.read(EEP_SERVO_ON);
+      short sv = servo.write(angle, SERVO_PULSECOUNT);
+      if(replying) btSerial.println(angle, DEC);
+      if(replying) btSerial.println("OK");
+    } else if(arglinebuf[0] == 'f') {
+      byte angle = EEPROM.read(EEP_SERVO_OFF);
+      short sv = servo.write(angle, SERVO_PULSECOUNT);
+      if(replying) btSerial.println(angle, DEC);
+      if(replying) btSerial.println("OK");
+    } else {
+      if(replying) btSerial.println("ERROR");
+    }
   } else if(command == 't') { //RTC SET : tUTCSTAMP
     Time* t = parseTimeStamp(atol(arglinebuf));
     rtc.writeProtect(false);
