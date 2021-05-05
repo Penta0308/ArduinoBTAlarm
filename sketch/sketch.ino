@@ -204,6 +204,8 @@ Time* parseTimeStamp(time_t ts) {
  * Commands:
  *  sADDR(4-digit Decimal)DATA(3-digit Decimal) : EEP WRITE
  *  eANGLE(Decimal) : SERVO SET
+ *  en              : SERVO ON  : EEP {EEP_SERVO_ON}
+ *  ef              : SERVO OFF : EEP {EEP_SERVO_OFF}
  *  tUTCSTAMP : RTC SET
  *  g : RTC GET
  *  rALARMID(1-digit Decimal, 0~9)DeltaUTCSTAMP : ALARM SET - RECORDING ON
